@@ -1,0 +1,30 @@
+env: ${env}
+svc: honeypot-sockets
+mysqlhost: ${mysqlhost}
+mysqluser: ${mysqlUser}
+mysqlpass: ${mysqlpass}
+mysqlport: ${mysqlport}
+mysqldb: ipblock
+mysqltimeout: 30
+logLevel: 7
+servicePorts:
+  - 20
+  - 21
+  - 23
+  - 25
+  - 53
+  - 69
+  - 80
+  - 109
+  - 110
+  - 123
+  - 137
+  - 139
+  - 389
+  - 465
+  - 512
+  - 513
+  - 514
+  - 515
+  - 587
+  - 3306

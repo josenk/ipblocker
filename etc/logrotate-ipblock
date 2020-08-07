@@ -1,0 +1,11 @@
+/var/log/ipblock-prod/*log {
+    weekly
+    rotate 3
+    maxsize 50M
+    missingok
+    notifempty
+    nocreate
+    compress
+    copytruncate
+    sharedscripts
+}

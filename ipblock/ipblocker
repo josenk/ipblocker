@@ -1,0 +1,179 @@
+#!/usr/bin/python3
+
+from ipblockHelpers import *
+import config
+
+import pymysql
+import ssl
+import warnings                   # To filter mysql warnings
+import sys                        # For args
+import os.path                    # To check if file exists
+import datetime
+import time                       # For Sleep
+import re
+import socket
+
+warnings.filterwarnings('ignore')
+pot        = socket.gethostbyaddr(socket.gethostname())[0].split(".")[0]
+config.svc = "ipblocker"
+
+
+#######################################################
+#      Parse Arguments
+#######################################################
+if not parseArgs():
+    sys.exit(1)
+
+
+#  Read ConfigFile data
+readConfigData()
+if len(config.ConfigData) == 0:
+    print("Error: No configuration found in %s" % config.args.configFile)
+    sys.exit(1)
+
+# Read each entry from configFile
+try:
+    config.env   = config.ConfigData['env']
+    mysqlhost    = config.ConfigData['mysqlhost']
+    mysqlport    = config.ConfigData['mysqlport']
+    mysqluser    = config.ConfigData['mysqluser']
+    mysqlpass    = config.ConfigData['mysqlpass']
+    mysqldb      = config.ConfigData['mysqldb']
+    mysqltimeout = config.ConfigData['mysqltimeout']
+    if config.args.logLevel != -1:
+        config.logLevel = int(config.args.logLevel)
+    else:
+        config.logLevel = int(config.ConfigData['logLevel'])
+    sleepTimer   = int(config.ConfigData['sleepTimer'])
+except KeyError:
+    print("Error: Missing argument in config file:", sys.exc_info()[1])
+    sys.exit(1)
+except:
+    print("Error: %s" % sys.exc_info()[1])
+    sys.exit(1)
+
+
+#  Other Variables
+tableNameDrop      = "drop_" + config.env
+logDir             = "/var/log/ipblock-" + config.env
+newDropIPs         = []
+newDropIPs_keys    = []
+fwLineNumber       = []
+fwIpAndCidr        = []
+
+if os.path.exists('/usr/sbin/nft'):
+    config.fwType = "nft"
+elif os.path.exists('/usr/sbin/iptables'):
+    config.fwType = "iptables"
+else:
+    print("Error: Unable to determine Firewall type.")
+    sys.exit(1)
+
+
+#  Create DB connection
+if not createDBconnection(mysqlhost, mysqlport, mysqluser, mysqlpass, mysqldb, mysqltimeout):
+    sys.exit(1)
+
+
+#######################################################
+#
+#   Main Code
+#
+#######################################################
+if not os.path.exists(logDir):
+    os.makedirs(logDir, mode=0o700, exist_ok=True)
+
+if not os.path.exists("/var/lib/ipblock"):
+    os.makedirs("/var/lib/ipblock", mode=0o700, exist_ok=True)
+
+
+config.activitylogFileFH = open(logDir + '/' + config.svc + '.log', "a")
+try:
+    writeLog(1, "action=\"starting service\" pot=%s" % pot)
+except:
+    print("Error: Unable to write to activity log. %s" % sys.exc_info()[1])
+    sys.exit(1)
+
+
+while True:
+    #  Get all new Drop entry from DB
+
+    del newDropIPs[:]
+    del newDropIPs_keys[:]
+    isComplete = False
+    for i in getAllIps(tableNameDrop):
+        if str(i[0]) == "999.999.999.999":
+            isComplete = True
+        else:
+            newDropIPs_keys.append(str(i[0]))
+            newDropIPs.append(i)
+
+    if isComplete == True:
+        str_newDropIPs = str(newDropIPs_keys)
+    else:
+        writeLog(1, "action=\"read %s\" msg=\"error: completion record not found\"" % tableNameDrop)
+        time.sleep(sleepTimer)
+        continue
+
+    if len(newDropIPs) == 0:
+        writeLog(1, "action=\"read %s\" msg=\"error: unable access db\"" % tableNameDrop)
+        time.sleep(sleepTimer)
+        continue
+    else:
+        writeLog(7, "action=\"read %s\" droptablesize=%d" % (tableNameDrop, len(newDropIPs)))
+
+    #  Get all existing Drop entries from iptables/nft command
+    try:
+        del fwLineNumber[:]
+    except:
+        pass
+    try:
+        del fwIpAndCidr[:]
+    except:
+        pass
+
+    fwIpAndCidr, fwLineNumber = getFwEntries()
+    if fwIpAndCidr == -1:
+        print("Is firewall daemon down?  nftables/iptables?")
+        time.sleep(sleepTimer)
+        continue
+
+    str_fwIpAndCidr = str(fwIpAndCidr)
+    writeLog(7, "action=\"read fw\" fwtablessize=%d " % len(fwIpAndCidr))
+
+    writeLog(9, "action=\"searching for invalid fw drop entries\"")
+    for i in range(len(fwIpAndCidr) - 1, -1, -1):
+        for x in range(0,i):
+            if fwIpAndCidr[i] == fwIpAndCidr[x]:
+                writeLog(1, "action=\"delete fw dup\" msg=\"line1=%s line2=%s\"" % (fwLineNumber[i], fwLineNumber[x]))
+                fwDup = True
+                break
+            else:
+                fwDup = False
+
+        if (str_newDropIPs.find(fwIpAndCidr[i]) == -1) or (fwDup == True):
+            returncode = deleteFwEntry(fwLineNumber[i])
+            if returncode != 0:
+                writeLog(1, "action=\"delete fw entry\" msg=\"error: %s\" suspect=%s fwline=%s" % (out.stdout.decode('utf-8'), fwIpAndCidr[i], fwLineNumber[i]))
+            else:
+                writeLog(5, "action=\"delete fw entry\" suspect=%s fwline=%s" % (fwIpAndCidr[i], fwLineNumber[i]))
+
+    writeLog(9, "action=\"searching for new fw drop entries\"")
+    for i in range(len(newDropIPs)):
+        fwRule   = newDropIPs[i][0]
+        suspects = newDropIPs[i][1]
+
+        if fwRule.find('/32') > 0:
+            newDropRule = fwRule[:fwRule.find('/32')]
+        else:
+            newDropRule = fwRule
+
+        if str_fwIpAndCidr.find(newDropRule) == -1:
+            returncode = addFwEntry(newDropRule)
+            if returncode != 0:
+                writeLog(1, "action=\"drop to fw\" msg=\"error: %s\" fwrule=%s suspect=\"%s\"" % (out.stdout.decode('utf-8'), newDropIPs[i][0], suspects))
+            else:
+                writeLog(5, "action=\"drop to fw\" fwrule=%s suspect=\"%s\"" % (newDropIPs[i][0], suspects))
+
+    config.activitylogFileFH.flush()
+    time.sleep(sleepTimer)

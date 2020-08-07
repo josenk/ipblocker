@@ -1,0 +1,112 @@
+#!/usr/bin/python3
+
+from ipblockHelpers import *
+import config
+
+from pygtail import Pygtail
+
+import pymysql
+import ssl
+import warnings                   # To filter mysql warnings
+import sys                        # For args
+import os.path                    # To check if file exists
+import datetime
+import time                       # For Sleep
+import yaml
+import argparse
+import re
+import socket
+
+warnings.filterwarnings('ignore')
+config.pot = socket.gethostbyaddr(socket.gethostname())[0].split(".")[0]
+
+
+#######################################################
+#      Parse Arguments
+#######################################################
+if not parseArgs():
+    sys.exit(1)
+
+
+#  Read ConfigFile data
+readConfigData()
+if len(config.ConfigData) == 0:
+    print("Error: No configuration found in %s" % config.args.configFile)
+    sys.exit(1)
+
+
+# Read each entry from configFile
+try:
+    config.env   = config.ConfigData['env']
+    config.svc   = config.ConfigData['svc']
+    svcLogFile   = config.ConfigData['svcLogFile']
+    regEx1       = re.compile(config.ConfigData['regEx1'])
+    regEx2       = re.compile(config.ConfigData['regEx2'])
+    mysqlhost    = config.ConfigData['mysqlhost']
+    mysqlport    = config.ConfigData['mysqlport']
+    mysqluser    = config.ConfigData['mysqluser']
+    mysqlpass    = config.ConfigData['mysqlpass']
+    mysqldb      = config.ConfigData['mysqldb']
+    mysqltimeout = config.ConfigData['mysqltimeout']
+    if config.args.logLevel != -1:
+        config.logLevel = int(config.args.logLevel)
+    else:
+        config.logLevel = int(config.ConfigData['logLevel'])
+except KeyError:
+    print("Error: Missing argument:", sys.exc_info()[1])
+    sys.exit(1)
+except:
+    print("Error: ", sys.exc_info())
+    sys.exit(1)
+
+
+#  Other Variables
+regExIP                 = re.compile('\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+offsetFile              = "/var/lib/ipblock/" + config.svc + "-" + svcLogFile.split("/")[-1]
+config.tableNameSuspect = "suspect_" + config.env
+logDir                  = "/var/log/ipblock-" + config.env
+
+
+#  Create DB connection
+if not createDBconnection(mysqlhost, mysqlport, mysqluser, mysqlpass, mysqldb, mysqltimeout):
+    sys.exit(1)
+
+
+#######################################################
+#
+#   Main Code
+#
+#######################################################
+if not os.path.exists(logDir):
+    os.makedirs(logDir, mode=0o700, exist_ok=True)
+
+if not os.path.exists("/var/lib/ipblock"):
+    os.makedirs("/var/lib/ipblock", mode=0o700, exist_ok=True)
+
+
+config.activitylogFileFH = open(logDir + '/service-' + config.svc + '.log', "a")
+try:
+    writeLog(1, "action=\"starting service\" pot=%s" % config.pot)
+except:
+    print("Error: Unable to write to error log:")
+    sys.exit(1)
+
+
+while True:
+    for line in Pygtail(svcLogFile, read_from_end=True):
+        found1 = regEx1.search(line)
+
+        if found1 != None:
+            writeLog(9, "action=\"found regEx1\" regex1=%s" % found1.group())
+            found2 = regEx2.search(line)
+
+            if found2 != None:
+                writeLog(9, "action=\"found regEx2\" regex2=%s" % found2.group())
+                ip = regExIP.search(str(found2.group()))
+
+                if ip != None:
+                    writeLog(9, "action=\"found IP\" regexIP=%s" % ip.group())
+                    addToSuspect(str(ip.group()))
+
+    config.activitylogFileFH.flush()
+    time.sleep(1)

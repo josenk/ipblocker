@@ -1,0 +1,12 @@
+[Unit]
+Description="ipblock service monitor - honeypot-httpd"
+After=syslog.target network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ipblock/ipblock-honeypot-httpd -c /etc/ipblock/honeypot-httpd
+Restart=on-failure
+RestartSec=60s
+
+[Install]
+WantedBy=multi-user.target

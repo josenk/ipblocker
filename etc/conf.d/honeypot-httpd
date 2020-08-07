@@ -1,0 +1,19 @@
+env: ${env}
+svc: honeypot-httpd-${httpdHoneypotPort}
+mysqlhost: ${mysqlhost}
+mysqluser: ${mysqlUser}
+mysqlpass: ${mysqlpass}
+mysqlport: ${mysqlport}
+mysqldb: ipblock
+mysqltimeout: 30
+logLevel: 7
+sleepTimer: 3
+servicePort: ${httpdHoneypotPort}
+serverVersion: 'Apache/2.4.6 (CentOS) OpenSSL/1.0.1e-fips PHP/5.4.16 mod_wsgi/3.4'
+sysVersion: 'Python/2.7.5'
+sendResponse: 401
+headers:
+  - WWW-Authenticate: 'Basic realm="production"'
+  - content-type: 'text/html; charset=UTF-8'
+  - Accept-Ranges: bytes
+  - eTag: "0-4d93726b39595"

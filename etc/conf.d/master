@@ -1,0 +1,23 @@
+env: ${env}
+svc: master
+mysqlhost: ${mysqlhost}
+mysqluser: ${mysqlUser}
+mysqlpass: ${mysqlpass}
+mysqlport: ${mysqlport}
+mysqldb: ipblock
+mysqltimeout: 10
+logLevel: 7
+maxBlockTableSize: 10000
+sleepTimer: 60
+numFail:
+  - 60: 30
+  - 30: 20
+  - 5: 12
+blockCIDRs:
+  - 26: 2
+  - 24: 3
+  - 22: 4
+  - 20: 8
+  - 16: 16
+  - 12: 40
+  - 8: 128

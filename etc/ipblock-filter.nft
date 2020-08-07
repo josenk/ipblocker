@@ -1,0 +1,14 @@
+#!/usr/sbin/nft -f
+
+table inet filter {
+        set blacklist           {
+                type ipv4_addr;
+                size 65535;
+                timeout 10s;
+        }
+        chain ipblock_input     {
+                type filter hook input priority 0;
+                policy accept;
+                ip saddr @blacklist drop;
+        }
+}

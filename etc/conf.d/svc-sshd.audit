@@ -1,0 +1,12 @@
+env: ${env}
+svc: svc-ssh
+mysqlhost: ${mysqlhost}
+mysqluser: ${mysqlUser}
+mysqlpass: ${mysqlpass}
+mysqlport: ${mysqlport}
+mysqldb: ipblock
+mysqltimeout: 30
+logLevel: 7
+svcLogFile: /var/log/audit/audit.log
+regEx1: 'sshd.*res=failed'
+regEx2: 'addr=[0-9\.]* '

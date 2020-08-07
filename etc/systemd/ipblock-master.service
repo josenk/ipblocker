@@ -1,0 +1,12 @@
+[Unit]
+Description="ipblock master"
+After=syslog.target network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ipblock/ipblock-master -c /etc/ipblock/master
+Restart=on-failure
+RestartSec=60s
+
+[Install]
+WantedBy=multi-user.target

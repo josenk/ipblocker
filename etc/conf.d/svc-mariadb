@@ -1,0 +1,12 @@
+env: ${env}
+svc: svc-mariadb
+mysqlhost: ${mysqlhost}
+mysqluser: ${mysqlUser}
+mysqlpass: ${mysqlpass}
+mysqlport: ${mysqlport}
+mysqldb: ipblock
+mysqltimeout: 30
+logLevel: 7
+svcLogFile: ${mariadbLogFile}
+regEx1: 'Access denied for user.*password: YES'
+regEx2: '.*'

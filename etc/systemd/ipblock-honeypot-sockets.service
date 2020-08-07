@@ -1,0 +1,12 @@
+[Unit]
+Description="ipblock service monitor - honeypot-sockets"
+After=syslog.target network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ipblock/ipblock-honeypot-sockets -c /etc/ipblock/honeypot-sockets
+Restart=on-failure
+RestartSec=60s
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,12 @@
+[Unit]
+Description="ipblocker client"
+After=syslog.target network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ipblock/ipblocker -c /etc/ipblock/ipblocker
+Restart=on-failure
+RestartSec=60s
+
+[Install]
+WantedBy=multi-user.target

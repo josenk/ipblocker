@@ -1,0 +1,12 @@
+[Unit]
+Description="ipblock service monitor - honeypot-sshd"
+After=syslog.target network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ipblock/ipblock-honeypot-sshd -c /etc/ipblock/honeypot-sshd
+Restart=on-failure
+RestartSec=60s
+
+[Install]
+WantedBy=multi-user.target

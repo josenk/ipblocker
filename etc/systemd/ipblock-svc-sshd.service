@@ -1,0 +1,12 @@
+[Unit]
+Description="ipblock service monitor - ssh"
+After=syslog.target network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/ipblock/ipblock-svc-monitor -c /etc/ipblock/svc-sshd
+Restart=on-failure
+RestartSec=60s
+
+[Install]
+WantedBy=multi-user.target

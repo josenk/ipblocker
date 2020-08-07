@@ -1,0 +1,11 @@
+env: ${env}
+svc: honeypot-sshd-${SshdHoneypotPort}
+mysqlhost: ${mysqlhost}
+mysqluser: ${mysqlUser}
+mysqlpass: ${mysqlpass}
+mysqlport: ${mysqlport}
+mysqldb: ipblock
+mysqltimeout: 30
+logLevel: 7
+sleepTimer: 3
+servicePort: ${SshdHoneypotPort}

@@ -1,0 +1,10 @@
+env: ${env}
+svc: ipblocker
+mysqlhost: ${mysqlhost}
+mysqluser: ${mysqlUser}
+mysqlpass: ${mysqlpass}
+mysqlport: ${mysqlport}
+mysqldb: ipblock
+mysqltimeout: 60
+logLevel: 7
+sleepTimer: 30

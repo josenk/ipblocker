@@ -1,0 +1,215 @@
+#!/usr/bin/python3
+
+from ipblockHelpers import *
+import config
+
+from pygtail import Pygtail
+from binascii import hexlify
+
+import pymysql
+import ssl
+import warnings                   # To filter mysql warnings
+import sys                        # For args
+import os.path                    # To check if file exists
+import datetime
+import time                       # For Sleep
+import yaml
+import argparse
+import re
+import socket
+import os
+import threading
+import traceback
+import paramiko
+from paramiko.py3compat import b, u, decodebytes
+
+
+warnings.filterwarnings('ignore')
+config.pot = socket.gethostbyaddr(socket.gethostname())[0].split(".")[0]
+
+
+#######################################################
+#      Parse Arguments
+#######################################################
+if not parseArgs():
+    sys.exit(1)
+
+
+#  Read ConfigFile data
+readConfigData()
+if len(config.ConfigData) == 0:
+    print("Error: No configuration found in %s" % config.args.configFile)
+    sys.exit(1)
+
+
+# Read each entry from configFile
+try:
+    config.env   = config.ConfigData['env']
+    config.svc   = config.ConfigData['svc']
+    mysqlhost    = config.ConfigData['mysqlhost']
+    mysqlport    = config.ConfigData['mysqlport']
+    mysqluser    = config.ConfigData['mysqluser']
+    mysqlpass    = config.ConfigData['mysqlpass']
+    mysqldb      = config.ConfigData['mysqldb']
+    mysqltimeout = config.ConfigData['mysqltimeout']
+    if config.args.logLevel != -1:
+        config.logLevel = int(config.args.logLevel)
+    else:
+        config.logLevel = int(config.ConfigData['logLevel'])
+    sleepTimer   = config.ConfigData['sleepTimer']
+    servicePort  = config.ConfigData['servicePort']
+except KeyError:
+    print("Error: Missing argument:", sys.exc_info()[1])
+    sys.exit(1)
+except:
+    print("Error: %s" % sys.exc_info()[1])
+    sys.exit(1)
+
+
+
+#  Other Variables
+regExIP                 = re.compile('\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}')
+config.tableNameSuspect = "suspect_" + config.env
+logDir                  = "/var/log/ipblock-" + config.env
+
+
+#  Create DB connection
+if not createDBconnection(mysqlhost, mysqlport, mysqluser, mysqlpass, mysqldb, mysqltimeout):
+    sys.exit(1)
+
+
+#######################################################
+#
+#   Main Code
+#
+#######################################################
+if not os.path.exists(logDir):
+    os.makedirs(logDir, mode=0o700, exist_ok=True)
+
+if not os.path.exists("/var/lib/ipblock"):
+    os.makedirs("/var/lib/ipblock", mode=0o700, exist_ok=True)
+
+
+config.activitylogFileFH = open(logDir + '/service-' + config.svc + '.log', "a")
+try:
+    writeLog(1, "action=\"starting service\" pot=%s" % config.pot)
+except:
+    print("Error: Unable to write to error log. %s" % sys.exc_info()[1])
+    sys.exit(1)
+
+
+# setup logging
+if config.logLevel >= 9:
+    paramiko.util.log_to_file(logDir + '/service-' + config.svc + '-debug.log')
+
+host_key = paramiko.RSAKey(filename="/var/lib/ipblock/ssh_host_rsa_key")
+
+class Server(paramiko.ServerInterface):
+    # 'data' is the output of base64.b64encode(key)
+    # (using the "user_rsa_key" files)
+    data = (
+        b"AAAAB3NzaC1yc2EAAAABIwAAAIEAyO4it3fHlmGZWJaGrfeHOVY7RWO3P9M7hp"
+        b"fAu7jJ2d7eothvfeuoRFtJwhUmZDluRdFyhFY/hFAh76PJKGAusIqIQKlkJxMC"
+        b"KDqIexkgHAfID/6mqvmnSJf0b5W8v5h2pI/stOSwTQ+pxVhwJ9ctYDhRSlF0iT"
+        b"UWT10hcuO4Ks8="
+    )
+    good_pub_key = paramiko.RSAKey(data=decodebytes(data))
+
+    def __init__(self):
+        self.event = threading.Event()
+
+    def check_channel_request(self, kind, chanid):
+        if kind == "session":
+            return paramiko.OPEN_SUCCEEDED
+        return paramiko.OPEN_FAILED_ADMINISTRATIVELY_PROHIBITED
+
+    def check_auth_password(self, username, password):
+        return paramiko.AUTH_FAILED
+
+    def check_auth_publickey(self, username, key):
+        return paramiko.AUTH_FAILED
+
+    def check_auth_gssapi_with_mic(
+        self, username, gss_authenticated=paramiko.AUTH_FAILED, cc_file=None):
+        return paramiko.AUTH_FAILED
+
+    def check_auth_gssapi_keyex(
+        self, username, gss_authenticated=paramiko.AUTH_FAILED, cc_file=None):
+        return paramiko.AUTH_FAILED
+
+    def enable_auth_gssapi(self):
+        return True
+
+    def get_allowed_auths(self, username):
+        return "gssapi-keyex,gssapi-with-mic,password,publickey"
+
+    def check_channel_shell_request(self, channel):
+        self.event.set()
+        return True
+
+    def check_channel_pty_request(
+        self, channel, term, width, height, pixelwidth, pixelheight, modes):
+        return True
+
+
+DoGSSAPIKeyExchange = True
+
+
+while True:
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", servicePort))
+    except :
+        writeLog(9, "action=\"honeypot debug\" msg=\"Bind failed: %s\"" % sys.exc_info()[1])
+        traceback.print_exc()
+        time.sleep(sleepTimer)
+        continue
+
+    try:
+        sock.listen(100)
+        writeLog(9, "action=\"honeypot debug\" msg=\"Listening for connection\"")
+        client, addr = sock.accept()
+    except:
+        writeLog(9, "action=\"honeypot debug\" msg=\"Listen/accept failed: %s\"" % sys.exc_info()[1])
+        traceback.print_exc()
+        time.sleep(sleepTimer)
+        continue
+
+
+    writeLog(9, "action=\"honeypot debug\" msg=\"Got a connection!\" suspect=%s" % str(addr[0]))
+
+    try:
+        t = paramiko.Transport(client, gss_kex=DoGSSAPIKeyExchange)
+        t.set_gss_host(socket.getfqdn(""))
+        try:
+            t.load_server_moduli()
+        except:
+            writeLog(9, "action=\"honeypot debug\" msg=\"err: %s\"" % sys.exc_info()[1])
+            raise
+        t.add_server_key(host_key)
+        server = Server()
+        try:
+            t.local_version = 'SSH-2.0-OpenSSH_7.4'  # todo, make this configurable
+            t.start_server(server=server)
+        except paramiko.SSHException:
+            writeLog(9, "action=\"honeypot debug\" msg=\"SSH negotiation failed (as expected)\"")
+            continue
+
+        # wait for auth
+        chan = t.accept(20)
+        if chan is None:
+            addToSuspect(str(addr[0]))
+            continue
+
+        # Connected at this point...  Just close and log.
+        chan.close()
+
+    except:
+        try:
+            t.close()
+        except:
+            pass
+
+    config.activitylogFileFH.flush()
+    time.sleep(sleepTimer)

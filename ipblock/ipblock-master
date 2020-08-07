@@ -1,0 +1,399 @@
+#!/usr/bin/python3
+
+from ipblockHelpers import *
+from ipblockMasterHelpers import *
+import config
+
+from netaddr import IPNetwork, IPAddress
+from socket import inet_aton
+import struct
+import pymysql
+import ssl
+import warnings                   # To filter mysql warnings
+import sys                        # For args
+import os.path                    # To check if file exists
+import datetime
+import time                       # For Sleep
+import yaml
+import argparse
+import re
+import socket
+import signal
+
+warnings.filterwarnings('ignore')
+config.pot = socket.gethostbyaddr(socket.gethostname())[0].split(".")[0]
+
+
+#######################################################
+#      Parse Arguments
+#######################################################
+if not parseArgs():
+    sys.exit(1)
+
+
+#  Read ConfigFile data
+readConfigData()
+if len(config.ConfigData) == 0:
+    print("Error: No configuration found in %s" % config.args.configFile)
+    sys.exit(1)
+
+
+# Read each entry from configFile
+try:
+    config.env   = config.ConfigData['env']
+    config.svc   = config.ConfigData['svc']
+    mysqlhost    = config.ConfigData['mysqlhost']
+    mysqlport    = config.ConfigData['mysqlport']
+    mysqluser    = config.ConfigData['mysqluser']
+    mysqlpass    = config.ConfigData['mysqlpass']
+    mysqldb      = config.ConfigData['mysqldb']
+    mysqltimeout = config.ConfigData['mysqltimeout']
+    maxBlockTableSize = config.ConfigData['maxBlockTableSize']
+    if config.args.logLevel != -1:
+        config.logLevel = int(config.args.logLevel)
+    else:
+        config.logLevel = int(config.ConfigData['logLevel'])
+    sleepTimer   = int(config.ConfigData['sleepTimer'])
+except KeyError:
+    print("Error: Missing argument:", sys.exc_info()[1])
+    sys.exit(1)
+except:
+    print("Error: ", sys.exc_info()[1])
+    sys.exit(1)
+
+
+#  Other Variables
+tableNameSuspect = "suspect_" + config.env
+tableNameAllow   = "allow_" + config.env
+tableNameBlock   = "block_" + config.env
+tableNameDrop    = "drop_" + config.env
+purgeSize        = 10
+
+logDir                     = "/var/log/ipblock-" + config.env
+suspectMatch               = []
+numSuspects                = []
+suspectsInCidr             = []
+savedblockCIDR             = [-1] * 33
+savedAllowMasksSize        = -1
+savedtableNameBlockEntries = -1
+savednewDropSet            = -1
+savedCounter               = 0
+newDropTableList           = []
+
+
+#  Create DB connection
+if not createDBconnection(mysqlhost, mysqlport, mysqluser, mysqlpass, mysqldb, mysqltimeout):
+    sys.exit(1)
+
+
+#######################################################
+#
+#   Functions
+#
+#######################################################
+def addToTable(ip, notes, tableName):
+    mystatement = "INSERT INTO " + tableName + " (IP, DateTime, Notes) VALUES (%s, %s, %s) ON DUPLICATE KEY UPDATE DateTime = %s, Notes = %s"
+    values = (ip, datetime.datetime.now(), notes,  datetime.datetime.now(), notes)
+    count = 0
+    while count < config.retryCount:
+        try:
+            config.cursor.execute(mystatement, values)
+            count = config.retryCount + 1
+        except:
+            writeLog(1, "action=\"db Reconnect\" retry=%d" % count )
+            try:
+                config.mydb.ping(True)
+                config.cursor.execute(mystatement, values)
+                count = config.retryCount + 1
+            except:
+                count += 1
+                time.sleep(count)
+
+    if count == config.retryCount:
+        config.mydb.commit()
+        writeLog(1, "action=\"add to %s table\" msg=\"error: unable to access db\" suspect=%s" % (tableName, ip))
+        return False
+
+    return True
+
+
+def getSuspects(interval, maxFailed):
+    #  Returns (IPs and msg) that match the failed criteria. >maxFailed login attempts per interval (minutes).
+    suspect = []
+    suspects = []
+
+    try:
+        config.mydb.ping(True)
+        mystatement = "SELECT DISTINCT IP FROM %s WHERE DateTime < (NOW() - INTERVAL %s MINUTE) ;" % (tableNameSuspect, interval)
+        config.cursor.execute(mystatement)
+        IPs = config.cursor.fetchall()
+        config.mydb.commit()
+    except:
+        return -1
+
+    for ip in IPs:
+        try:
+            config.mydb.ping(True)
+            mystatement = "SELECT count(id) FROM %s WHERE (DateTime < (NOW() - INTERVAL %s MINUTE)) AND (IP = '%s') ;" % (tableNameSuspect, interval, ip[0])
+            config.cursor.execute(mystatement)
+            ipCount = int(config.cursor.fetchone()[0])
+            config.mydb.commit()
+        except:
+            return -1
+
+        if ipCount >= int(maxFailed):
+            notes = "%d failed login attempts in %s minutes" % (ipCount, interval)
+            suspect = [ ip[0], notes ]
+            suspects.append(suspect)
+            writeLog(5, "action=\"suspect to block-drop\" suspect=%s count=%d rule_interval=%s rule_maxfailed=%s notes=\"%s\"" % (ip[0], ipCount, interval, maxFailed, notes))
+
+    return suspects
+
+
+def getAllowMasks():
+    try:
+        config.mydb.ping(True)
+        mystatement = "SELECT DISTINCT Mask FROM %s ;" % tableNameAllow
+        config.cursor.execute(mystatement)
+        masks = config.cursor.fetchall()
+        config.mydb.commit()
+        writeLog(9, "action=\"get allow masks\" allowmasks=%s" % str(masks))
+    except:
+        writeLog(9, "action=\"get allow masks\" msg=\"error: %s\"" % (str(masks), sys.exc_info()[1]))
+        return ""
+    return masks
+
+
+def checkAllow(ip, allowMasks):
+    for allowMask in allowMasks:
+        if IPAddress(ip) in IPNetwork(allowMask[0]):
+            writeLog(9, "action=\"suspect is whitelisted\" suspect=%s allowmask=%s" % (ip, allowMask[0]))
+            return True
+    return False
+
+
+def clearDropTable():
+    try:
+        mystatement = "TRUNCATE %s;" % tableNameDrop
+        config.cursor.execute(mystatement)
+        config.mydb.commit()
+        writeLog(9, "action=\"clear Drop table\"" )
+    except:
+        writeLog(1, "action=\"clear Drop table\" msg=\"error: %s\"" % sys.exc_info()[1])
+        return False
+
+    return True
+
+
+def cleanupTables(tableNameBlockEntries):
+    try:
+        #   Cleanup Suspect table
+        config.cursor.execute("DELETE FROM %s WHERE DateTime < (NOW() - INTERVAL %d HOUR) ;" % (tableNameSuspect, purgeSize))
+        config.mydb.commit()
+    except:
+        writeLog(1, "action=\"cleanup stale entries in %s\" msg=\"error: %s\"" % (tableNameSuspect, sys.exc_info()[1]))
+
+    #  Reduce Block Table if it's too large
+    if tableNameBlockEntries > maxBlockTableSize:
+        try:
+            config.cursor.execute("DELETE FROM %s  WHERE DateTime IS NOT NULL ORDER BY DateTime LIMIT %d;" % (tableNameBlock, purgeSize))
+            config.mydb.commit()
+            writeLog(7, "action=\"cleanup stale entries in %s\"" % tableNameBlock)
+        except:
+            writeLog(1, "action=\"cleanup stale entries in %s\" msg=\"error: %s\"" % (tableNameBlock, sys.exc_info()[1]))
+
+
+def signal_handler(sig, frame):
+    iAmMaster('delete')
+    sys.exit(0)
+signal.signal(signal.SIGINT, signal_handler)
+signal.signal(signal.SIGHUP, signal_handler)
+signal.signal(signal.SIGABRT, signal_handler)
+signal.signal(signal.SIGTERM, signal_handler)
+
+
+#######################################################
+#
+#   Main Code
+#
+#######################################################
+
+unlockTable()
+
+if not os.path.exists(logDir):
+    os.makedirs(logDir, mode=0o700, exist_ok=True)
+
+if not os.path.exists("/var/lib/ipblock"):
+    os.makedirs("/var/lib/ipblock", mode=0o700, exist_ok=True)
+
+
+config.activitylogFileFH = open(logDir + '/service-' + config.svc + '.log', "a")
+try:
+    writeLog(1, "action=\"starting service\" pot=%s" % config.pot)
+except:
+    print("Error: Unable to write to error log. %s" % sys.exc_info()[1])
+    sys.exit(1)
+
+
+while True:
+    if not iAmMaster('request'):
+        time.sleep(sleepTimer)
+        continue
+
+    start_time = time.time()
+
+    allowMasks = getAllowMasks()
+    if len(allowMasks) == 0:
+        time.sleep(sleepTimer)
+        continue
+
+    #
+    #  From Suspect to Block
+    #
+    for numFailConfig in config.ConfigData['numFail']:
+        interval  = next(iter(numFailConfig))
+        maxFailed = numFailConfig[int(interval)]
+
+        suspects = getSuspects(interval, maxFailed)
+        if suspects == -1:
+            time.sleep(sleepTimer)
+            continue
+
+        for suspect in suspects:
+            ip = suspect[0]
+            notes = suspect[1]
+            if checkAllow(ip, allowMasks) == True:
+                try:
+                    mystatement = "DELETE FROM " + tableNameBlock + " WHERE IP = '%s' ;" % ip
+                    config.cursor.execute(mystatement)
+                    config.mydb.commit()
+                except:
+                    writeLog(1, "action=\"delete suspects from %s\" msg=\"error: %s\"" % (tableNameBlock, sys.exc_info()[1]))
+                    time.sleep(sleepTimer)
+                    continue
+            else:
+                addToTable(ip, notes, tableNameBlock)
+
+            try:
+                mystatement = "DELETE FROM " + tableNameSuspect + " WHERE IP = '%s' ;" % ip
+                config.cursor.execute(mystatement)
+                config.mydb.commit()
+            except:
+                writeLog(1, "action=\"delete suspects from %s\" msg=\"error: %s\"" % (tableNameSuspect, sys.exc_info()[1]))
+                time.sleep(sleepTimer)
+                continue
+
+    #
+    #  From block to DROP
+    #
+    if not iAmMaster('request'):
+        time.sleep(sleepTimer)
+        continue
+    ip = []
+    mask = []
+    tableNameBlockEntries = 0
+    for i in getAllIps(tableNameBlock, sorted=True):
+        ip.append(i[0])
+        mask.append(i[0] + "/32")
+        tableNameBlockEntries += 1
+
+
+    if tableNameBlockEntries == 0:
+        time.sleep(sleepTimer)
+        continue
+
+    #  From block to DROP, Match networks in CIDR blocks.
+    del suspectMatch[:]
+    for blockCIDRconfig in config.ConfigData['blockCIDRs']:
+        blockCIDR   = next(iter(blockCIDRconfig))
+        numSuspects = blockCIDRconfig[blockCIDR]
+
+        for x in range(tableNameBlockEntries):
+            suspectMatch = [x]
+            for y in range(x + 1, tableNameBlockEntries):
+
+                if (IPNetwork("%s/%s" % (ip[x], blockCIDR)) == IPNetwork("%s/%s" % (ip[y], blockCIDR))):
+                    suspectMatch.append(y)
+                else:
+                    x = y
+                    break
+
+            if len(suspectMatch) >= numSuspects:
+                for i in suspectMatch:
+                    mask[i] = "%s/%s" % (IPNetwork("%s/%s" % (ip[i], blockCIDR)).network, blockCIDR)
+
+    newDropSet = set(mask)
+
+    # report results
+    savedblockCIDR
+    matches = len([x for x in mask if x.endswith('/32')])
+    if (matches != savedblockCIDR[32]) or (savedCounter == 0):
+        savedCounter = 0
+        savedblockCIDR[32] = matches
+        writeLog(7, "action=\"report cidrs matches\" cidrblock=32 matches=%d" % matches)
+
+    for blockCIDRconfig in config.ConfigData['blockCIDRs']:
+        blockCIDR   = next(iter(blockCIDRconfig))
+        matches = len(set([x for x in mask if x.endswith('/%d' % blockCIDR)]))
+        if (matches != savedblockCIDR[blockCIDR]) or (savedCounter == 0):
+          savedCounter = 0
+          savedblockCIDR[blockCIDR] = matches
+          writeLog(7, "action=\"report cidrs matches\" cidrblock=%d matches=%d" % (blockCIDR, matches) )
+
+
+    #  Write new Drop table.
+    if not iAmMaster('request'):
+        time.sleep(sleepTimer)
+        continue
+    lock_start_time = time.time()
+    del newDropTableList[:]
+
+    for ipCidr in list(newDropSet):
+        ipsInThisCidr = [i for i, x in enumerate(mask) if x == ipCidr]
+        del suspectsInCidr[:]
+        for x in ipsInThisCidr:
+            suspectsInCidr.append(ip[x])
+        newDropTableList.append([ipCidr, str(suspectsInCidr)])
+
+    if not lockTable(tableNameDrop):
+        unlockTable()
+        time.sleep(sleepTimer)
+        continue
+
+    if clearDropTable():
+        for ipCidr, Notes in newDropTableList:
+            if addToTable(ipCidr, Notes, tableNameDrop) == False:
+                unlockTable()
+                time.sleep(sleepTimer)
+                continue
+
+        if addToTable('999.999.999.999', 'completion record', tableNameDrop) == False:
+            unlockTable()
+            time.sleep(sleepTimer)
+            continue
+
+    unlockTable()
+
+    newDropSetLen = len(newDropSet) - 1
+    allowMasksLen = len(allowMasks)
+    if ((savedAllowMasksSize != allowMasksLen) and (savedtableNameBlockEntries != tableNameBlockEntries) and (savednewDropSet != newDropSetLen)) or (savedCounter == 0):
+        savedAllowMasksSize = allowMasksLen
+        savedtableNameBlockEntries = tableNameBlockEntries
+        savednewDropSet = newDropSetLen
+        writeLog(7, "action=\"report table size\" allowtablesize=%d blocktablesize=%d droptablesize=%d elapse=%d dbelapse=%d" % (allowMasksLen, tableNameBlockEntries, newDropSetLen, int(time.time() - start_time), int(time.time() - lock_start_time)))
+
+
+    #
+    #  Do cleanup
+    #
+    if not iAmMaster('request'):
+        time.sleep(sleepTimer)
+        continue
+    cleanupTables(tableNameBlockEntries)
+    savedCounter -= 1
+    if savedCounter < 0:
+        savedCounter = 5
+
+    config.activitylogFileFH.flush()
+    iAmMaster('release')
+    time.sleep(sleepTimer)

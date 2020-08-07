@@ -1,0 +1,12 @@
+env: ${env}
+svc: svc-ssh
+mysqlhost: ${mysqlhost}
+mysqluser: ${mysqlUser}
+mysqlpass: ${mysqlpass}
+mysqlport: ${mysqlport}
+mysqldb: ipblock
+mysqltimeout: 30
+logLevel: 7
+svcLogFile: /var/log/auth.log
+regEx1: 'authentication failure;.*tty=ssh'
+regEx2: 'rhost=[0-9\.]*'
